@@ -38,27 +38,66 @@ YAMAP                ヤマレコ                本アプリ
 地名入りGPXを読み込むと、軌跡・地名ラベル・各スポットの到着時刻（JST）が
 自動で表示されます。回転・余白・ラベル位置を調整して保存してください。
 
-## インストール
+## インストール（venv使用）
 
-Python 3.10 以上が必要です。
+Python 3.10 以上が必要です。依存パッケージは仮想環境（venv）に入れるため、
+システムのPython環境を汚しません。
+
+### Windows
+
+```bat
+git clone https://github.com/masashi-bayman/make_climbMap.git
+cd make_climbMap
+setup.bat
+```
+
+または手動で:
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### macOS / Linux
 
 ```bash
 git clone https://github.com/masashi-bayman/make_climbMap.git
 cd make_climbMap
+./setup.sh
+```
+
+または手動で:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ## 起動
 
-```bash
-python main.py
+### Windows
 
-# または、起動と同時にGPXを読み込む
-python main.py 山行データ.gpx
+`run.bat` をダブルクリック、またはコマンドで:
 
-# パッケージとしての起動も可能
-python -m climbmap
+```bat
+run.bat
+
+REM 起動と同時にGPXを読み込む
+run.bat 山行データ.gpx
 ```
+
+### macOS / Linux
+
+```bash
+./run.sh
+
+# 起動と同時にGPXを読み込む
+./run.sh 山行データ.gpx
+```
+
+※ venvを自分で有効化している場合は `python main.py` でも起動できます。
 
 ## 使い方
 
