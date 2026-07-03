@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# アプリの出力フォルダ
+output_*/
+
+# 個人のGPXデータ
+*.gpx
