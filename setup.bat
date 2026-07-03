@@ -1,26 +1,26 @@
 @echo off
-rem 初回セットアップ: venvを作成して依存パッケージをインストールする
+rem First-time setup: create venv and install dependencies
 cd /d "%~dp0"
 
 if not exist .venv (
-    echo venvを作成しています...
+    echo Creating venv...
     python -m venv .venv
     if errorlevel 1 (
-        echo エラー: venvの作成に失敗しました。Pythonがインストールされているか確認してください。
+        echo ERROR: failed to create venv. Please check that Python is installed.
         pause
         exit /b 1
     )
 )
 
-echo 依存パッケージをインストールしています...
+echo Installing dependencies...
 .venv\Scripts\python -m pip install --upgrade pip
 .venv\Scripts\python -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo エラー: パッケージのインストールに失敗しました。
+    echo ERROR: failed to install dependencies.
     pause
     exit /b 1
 )
 
 echo.
-echo セットアップ完了！ run.bat でアプリを起動できます。
+echo Setup complete! Run run.bat to start the app.
 pause

@@ -1,9 +1,9 @@
 @echo off
-rem アプリ起動: run.bat [GPXファイル]
+rem Start the app: run.bat [GPX file]
 cd /d "%~dp0"
 
 if not exist .venv\Scripts\python.exe (
-    echo venvが見つかりません。先に setup.bat を実行してください。
+    echo venv not found. Please run setup.bat first.
     pause
     exit /b 1
 )
