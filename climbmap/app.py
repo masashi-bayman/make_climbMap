@@ -3,9 +3,9 @@
 使い方の流れ:
     1. 「GPXを開く」で地名入りGPX（ヤマレコで変換したもの）を読み込む
     2. 右側のスポット一覧で名前の編集・表示/非表示を切り替える
-    3. 回転・余白を調整（変更すると自動で再描画）
+    3. 回転を調整し、地図のドラッグ移動・ホイール拡縮で構図を決める
     4. 地名ラベルをドラッグして位置を微調整
-    5. 必要なら方向矢印を配置
+    5. 必要なら方向矢印を配置（↑↓←→ボタンで向き指定）
     6. 「保存」で透過PNGと到着時刻テキストを出力
 """
 
@@ -45,17 +45,16 @@ class ClimbMapApp:
         self.canvas_tk = None                 # FigureCanvasTkAgg
         self.label_positions: dict[int, tuple[float, float]] = {}
         self.spot_rows: list[dict] = []       # スポット一覧の行ウィジェット情報
+        # 表示範囲 (x_min, x_max, y_min, y_max)。Noneなら自動
+        self.view: tuple[float, float, float, float] | None = None
 
-        # ドラッグ状態
+        # ドラッグ状態（ラベル移動／地図の移動）
         self._drag_item = None
         self._drag_offset = (0.0, 0.0)
+        self._pan_start = None  # (px, py, xlim, ylim)
 
         # 設定変数
         self.rotation_var = tk.IntVar(master=root, value=0)
-        self.top_margin_var = tk.DoubleVar(master=root, value=2.5)
-        self.bottom_margin_var = tk.DoubleVar(master=root, value=2.5)
-        self.left_margin_var = tk.DoubleVar(master=root, value=1.0)
-        self.right_margin_var = tk.DoubleVar(master=root, value=1.0)
         self.arrow_x_var = tk.StringVar(master=root, value="")
         self.arrow_y_var = tk.StringVar(master=root, value="")
         self.arrow_angle_var = tk.StringVar(master=root, value="0")
@@ -99,20 +98,14 @@ class ClimbMapApp:
         ttk.Button(frame_rot, text="適用",
                    command=self.apply_custom_rotation).pack(side="left", padx=1)
 
-        # --- 余白 ---
-        frame_margin = ttk.LabelFrame(controls, text="余白（軌跡サイズに対する倍率）", padding=5)
-        frame_margin.pack(side="left", padx=3, fill="y")
+        # --- 表示範囲 ---
+        frame_view = ttk.LabelFrame(controls, text="表示範囲", padding=5)
+        frame_view.pack(side="left", padx=3, fill="y")
 
-        for label, var in (("上", self.top_margin_var),
-                           ("下", self.bottom_margin_var),
-                           ("左", self.left_margin_var),
-                           ("右", self.right_margin_var)):
-            ttk.Label(frame_margin, text=label).pack(side="left", padx=(4, 1))
-            entry = ttk.Entry(frame_margin, width=5, textvariable=var)
-            entry.pack(side="left")
-            entry.bind("<Return>", lambda e: self.apply_margins())
-        ttk.Button(frame_margin, text="適用",
-                   command=self.apply_margins).pack(side="left", padx=4)
+        ttk.Label(frame_view, text="ドラッグ: 移動 / ホイール: 拡大縮小"
+                  ).pack(side="left", padx=2)
+        ttk.Button(frame_view, text="リセット",
+                   command=self.reset_view).pack(side="left", padx=2)
 
         # --- 矢印 ---
         frame_arrow = ttk.LabelFrame(controls, text="方向矢印", padding=5)
@@ -120,13 +113,17 @@ class ClimbMapApp:
 
         ttk.Button(frame_arrow, text="位置をクリックで指定",
                    command=self.pick_arrow_position).pack(side="left", padx=2)
+
+        for label, ang in (("→", 0), ("↑", 90), ("←", 180), ("↓", 270)):
+            ttk.Button(frame_arrow, text=label, width=3,
+                       command=lambda a=ang: self.set_arrow_angle(a)
+                       ).pack(side="left", padx=1)
+
         ttk.Label(frame_arrow, text="角度").pack(side="left", padx=(4, 1))
         entry_angle = ttk.Entry(frame_arrow, width=5,
                                 textvariable=self.arrow_angle_var)
         entry_angle.pack(side="left")
         entry_angle.bind("<Return>", lambda e: self.redraw())
-        ttk.Button(frame_arrow, text="描画",
-                   command=self.redraw).pack(side="left", padx=2)
         ttk.Button(frame_arrow, text="消去",
                    command=self.clear_arrow).pack(side="left", padx=2)
 
@@ -209,6 +206,7 @@ class ClimbMapApp:
         self.gpx_data = data
         self.gpx_path = path
         self.label_positions = {}
+        self.view = None
 
         if not data.waypoints:
             messagebox.showwarning(
@@ -289,11 +287,8 @@ class ClimbMapApp:
     def _current_settings(self) -> RenderSettings:
         return RenderSettings(
             angle_deg=self.rotation_var.get(),
-            top_margin=self.top_margin_var.get(),
-            bottom_margin=self.bottom_margin_var.get(),
-            left_margin=self.left_margin_var.get(),
-            right_margin=self.right_margin_var.get(),
             arrow=self._current_arrow(),
+            view=self.view,
         )
 
     def _current_arrow(self) -> Arrow | None:
@@ -319,8 +314,12 @@ class ClimbMapApp:
         try:
             settings = self._current_settings()
         except (tk.TclError, ValueError):
-            messagebox.showerror("エラー", "回転・余白は数値で指定してください")
+            messagebox.showerror("エラー", "回転は数値で指定してください")
             return
+
+        # 古いキャンバスへのドラッグ状態を引きずらない
+        self._drag_item = None
+        self._pan_start = None
 
         self.render = render_map(
             self.gpx_data, settings,
@@ -343,14 +342,16 @@ class ClimbMapApp:
         canvas.mpl_connect("button_press_event", self._on_press)
         canvas.mpl_connect("motion_notify_event", self._on_motion)
         canvas.mpl_connect("button_release_event", self._on_release)
+        canvas.mpl_connect("scroll_event", self._on_scroll)
 
-    # ===== 回転・余白 =====
+    # ===== 回転・表示範囲 =====
 
     def set_rotation(self, angle: int):
         angle = angle % 360
         if angle != self.rotation_var.get():
-            # 回転すると座標系が変わるため、ラベルの手動調整はリセット
+            # 回転すると座標系が変わるため、ラベルの手動調整と表示範囲はリセット
             self.label_positions = {}
+            self.view = None
         self.rotation_var.set(angle)
         self.entry_rotation.delete(0, tk.END)
         self.entry_rotation.insert(0, str(angle))
@@ -364,15 +365,20 @@ class ClimbMapApp:
             return
         self.set_rotation(angle)
 
-    def apply_margins(self):
-        try:
-            self._current_settings()
-        except (tk.TclError, ValueError):
-            messagebox.showerror("エラー", "余白は数値で指定してください")
-            return
-        self.redraw()
+    def reset_view(self):
+        """表示範囲を初期状態（自動計算）に戻す"""
+        self.view = None
+        if self.gpx_data is not None:
+            self.redraw()
 
-    # ===== ラベルのドラッグ =====
+    def _save_current_view(self):
+        """現在の表示範囲を記録し、再描画後も維持されるようにする"""
+        ax = self.render.ax
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        self.view = (x_min, x_max, y_min, y_max)
+
+    # ===== マウス操作（ラベルのドラッグ／地図の移動・拡縮） =====
 
     def _on_press(self, event):
         if event.inaxes is None or self.render is None:
@@ -380,6 +386,7 @@ class ClimbMapApp:
         if event.x is None or event.y is None:
             return
 
+        # まずラベルへのヒットを判定（ラベルのドラッグを優先）
         renderer = event.canvas.get_renderer()
         for item in self.render.labels:
             bbox = item.text.get_window_extent(renderer)
@@ -389,11 +396,21 @@ class ClimbMapApp:
                 x0, y0 = item.text.get_position()
                 self._drag_item = item
                 self._drag_offset = (x0 - event.xdata, y0 - event.ydata)
-                break
+                return
+
+        # ラベル以外をつかんだら地図の移動（パン）
+        ax = self.render.ax
+        self._pan_start = (event.x, event.y, ax.get_xlim(), ax.get_ylim())
 
     def _on_motion(self, event):
+        if self._drag_item is not None:
+            self._move_label(event)
+        elif self._pan_start is not None:
+            self._pan_map(event)
+
+    def _move_label(self, event):
         item = self._drag_item
-        if item is None or event.inaxes is None:
+        if event.inaxes is None:
             return
         if event.xdata is None or event.ydata is None:
             return
@@ -411,12 +428,46 @@ class ClimbMapApp:
         item.line.set_data([item.anchor_x, new_x], [item.anchor_y, new_y])
         event.canvas.draw_idle()
 
+    def _pan_map(self, event):
+        if event.x is None or event.y is None:
+            return
+        px0, py0, (x_min, x_max), (y_min, y_max) = self._pan_start
+        ax = self.render.ax
+
+        # ピクセル移動量をデータ座標に換算して表示範囲をずらす
+        dx = (event.x - px0) * (x_max - x_min) / ax.bbox.width
+        dy = (event.y - py0) * (y_max - y_min) / ax.bbox.height
+        ax.set_xlim(x_min - dx, x_max - dx)
+        ax.set_ylim(y_min - dy, y_max - dy)
+        event.canvas.draw_idle()
+
     def _on_release(self, event):
         if self._drag_item is not None:
-            # 位置を記録して、余白変更などの再描画後も維持する
+            # 位置を記録して、再描画後も維持する
             x, y = self._drag_item.text.get_position()
             self.label_positions[self._drag_item.index] = (x, y)
-        self._drag_item = None
+            self._drag_item = None
+        if self._pan_start is not None:
+            self._pan_start = None
+            self._save_current_view()
+
+    def _on_scroll(self, event):
+        """マウスホイールで拡大縮小（カーソル位置を中心に）"""
+        if self.render is None or event.inaxes is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        factor = 0.9 if event.button == "up" else 1.1
+        ax = self.render.ax
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        cx, cy = event.xdata, event.ydata
+
+        ax.set_xlim(cx + (x_min - cx) * factor, cx + (x_max - cx) * factor)
+        ax.set_ylim(cy + (y_min - cy) * factor, cy + (y_max - cy) * factor)
+        self._save_current_view()
+        event.canvas.draw_idle()
 
     # ===== 矢印 =====
 
@@ -440,6 +491,15 @@ class ClimbMapApp:
                 )
 
         cid = canvas.mpl_connect("button_press_event", on_click)
+
+    def set_arrow_angle(self, angle: int):
+        """↑↓←→ボタンから矢印の向きを設定する"""
+        self.arrow_angle_var.set(str(angle))
+        if self._current_arrow() is not None:
+            self.redraw()
+        else:
+            self.set_status(
+                "矢印の位置が未指定です。「位置をクリックで指定」を押して地図をクリックしてください")
 
     def clear_arrow(self):
         self.arrow_x_var.set("")

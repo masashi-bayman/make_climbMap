@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 
 import matplotlib.patches as patches
+import matplotlib.patheffects as path_effects
 from matplotlib.figure import Figure
 
 from .geometry import rotate_points
@@ -28,11 +29,15 @@ class RenderSettings:
     """描画パラメータ"""
 
     angle_deg: float = 0.0      # 軌跡全体の回転角（度、反時計回り）
-    top_margin: float = 2.5     # 各マージンは軌跡の高さ/幅に対する倍率
+    top_margin: float = 2.5     # 初期表示の余白（軌跡の高さ/幅に対する倍率）
     bottom_margin: float = 2.5
     left_margin: float = 1.0
     right_margin: float = 1.0
     arrow: Arrow | None = None
+    # 表示範囲 (x_min, x_max, y_min, y_max)。None なら余白から自動計算。
+    # GUIのドラッグ移動・ホイール拡縮で調整した範囲を再描画後も維持するために使う。
+    view: tuple[float, float, float, float] | None = None
+    show_compass: bool = True   # 方位記号（N）を表示するか
 
 
 @dataclass
@@ -94,19 +99,21 @@ def render_map(data: GpxData,
     pad_x = x_range * 0.3
     pad_y = y_range * 0.3
 
-    x_min_display = min_x - pad_x * settings.left_margin
-    x_max_display = max_x + pad_x * settings.right_margin
-    y_min_display = min_y - pad_y * settings.bottom_margin
-    y_max_display = max_y + pad_y * settings.top_margin
+    if settings.view is not None:
+        x_min_display, x_max_display, y_min_display, y_max_display = settings.view
+    else:
+        x_min_display = min_x - pad_x * settings.left_margin
+        x_max_display = max_x + pad_x * settings.right_margin
+        y_min_display = min_y - pad_y * settings.bottom_margin
+        y_max_display = max_y + pad_y * settings.top_margin
 
     fig = Figure(figsize=FIGSIZE, dpi=DPI)
     ax = fig.add_subplot(111)
 
-    # 半透明の背景（動画に重ねたとき軌跡が見やすいように）
+    # 半透明の背景（動画に重ねたとき軌跡が見やすいように）。
+    # Axes座標系で描くことで、ドラッグ移動・拡縮後も常に画面全体を覆う。
     background = patches.Rectangle(
-        (x_min_display, y_min_display),
-        x_max_display - x_min_display,
-        y_max_display - y_min_display,
+        (0, 0), 1, 1, transform=ax.transAxes,
         linewidth=0, facecolor="dimgray", alpha=0.70, zorder=0,
     )
     ax.add_patch(background)
@@ -155,11 +162,44 @@ def render_map(data: GpxData,
     if settings.arrow is not None:
         _draw_arrow(ax, settings.arrow, x_range, y_range)
 
+    if settings.show_compass:
+        _draw_compass(ax, settings.angle_deg)
+
     ax.set_aspect("equal")
     ax.set_axis_off()
     fig.tight_layout()
 
     return MapRender(figure=fig, ax=ax, labels=labels)
+
+
+def _draw_compass(ax, angle_deg: float):
+    """地図左下に方位記号（N矢印）を描く。
+
+    地図をangle_deg回転させて描いているため、北の向きも同じだけ回る。
+    位置はAxes座標系（左下固定）、矢印の長さはポイント単位なので、
+    ドラッグ移動・拡縮の影響を受けない。
+    """
+    t = math.radians(angle_deg)
+    # 元の座標系の北 (0, 1) を回転した方向
+    dx, dy = -math.sin(t), math.cos(t)
+    anchor = (0.08, 0.06)  # Axes座標（左下からの割合）
+    length = 26            # ポイント
+
+    ax.annotate(
+        "", xy=anchor, xycoords="axes fraction",
+        xytext=(-length * dx, -length * dy), textcoords="offset points",
+        arrowprops=dict(arrowstyle="-|>", color="white",
+                        linewidth=2.5, mutation_scale=18),
+        zorder=7, annotation_clip=False,
+    )
+    n_text = ax.annotate(
+        "N", xy=anchor, xycoords="axes fraction",
+        xytext=(13 * dx, 13 * dy), textcoords="offset points",
+        color="white", fontsize=13, fontweight="bold",
+        ha="center", va="center", zorder=7, annotation_clip=False,
+    )
+    n_text.set_path_effects(
+        [path_effects.withStroke(linewidth=3, foreground="black")])
 
 
 def _draw_arrow(ax, arrow: Arrow, x_range: float, y_range: float):
