@@ -28,6 +28,7 @@ class Waypoint:
     lat: float
     lon: float
     arrival_time: str = ""  # 'YYYY-MM-DD HH:MM:SS' (JST)
+    visible: bool = True    # 地図に表示するか（GUIの一覧で切り替え）
 
 
 @dataclass
@@ -122,9 +123,16 @@ def parse_gpx(gpx_path: str) -> GpxData:
 
 
 def format_waypoint_times(waypoints: list[Waypoint]) -> str:
-    """スポット到着時刻の一覧テキスト（動画説明欄などへのコピペ用）"""
+    """スポット到着時刻の一覧テキスト（動画説明欄などへのコピペ用）。
+
+    非表示にしたスポットは含めない。
+    """
     lines = []
-    for i, wp in enumerate(waypoints, 1):
+    n = 0
+    for wp in waypoints:
+        if not wp.visible:
+            continue
+        n += 1
         time_str = wp.arrival_time[-8:] if wp.arrival_time else "--:--:--"
-        lines.append(f"{i}. {wp.name}：{time_str}")
+        lines.append(f"{n}. {wp.name}：{time_str}")
     return "\n".join(lines)

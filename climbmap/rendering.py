@@ -39,6 +39,7 @@ class RenderSettings:
 class LabelItem:
     """描画済みの地名ラベル（ドラッグ調整用に artist を保持）"""
 
+    index: int            # data.waypoints 内でのインデックス
     name: str
     text: object          # matplotlib.text.Text
     line: object          # matplotlib.lines.Line2D（マーカーとラベルを結ぶ線）
@@ -59,14 +60,14 @@ class MapRender:
 def render_map(data: GpxData,
                settings: RenderSettings,
                font: str | None = None,
-               label_positions: dict[str, tuple[float, float]] | None = None) -> MapRender:
+               label_positions: dict[int, tuple[float, float]] | None = None) -> MapRender:
     """GPXデータから地図Figureを生成する。
 
     Args:
-        data: 解析済みGPXデータ
+        data: 解析済みGPXデータ（visible=False のスポットは描画しない）
         settings: 回転角・マージン・矢印の設定
         font: 日本語フォント名（Noneならmatplotlibデフォルト）
-        label_positions: ラベル位置の上書き {地名: (x, y)}。
+        label_positions: ラベル位置の上書き {waypointインデックス: (x, y)}。
             ドラッグで調整した位置を再描画後も維持するために使う。
     """
     label_positions = label_positions or {}
@@ -76,12 +77,14 @@ def render_map(data: GpxData,
         data.track["longitude"], data.track["latitude"], settings.angle_deg
     )
 
-    # ウェイポイントも同じ中心で回転
+    # 表示対象のウェイポイントを同じ中心で回転（元のインデックスを保持）
     wp_rotated = []
-    for wp in data.waypoints:
+    for idx, wp in enumerate(data.waypoints):
+        if not wp.visible:
+            continue
         wxs, wys, _ = rotate_points([wp.lon], [wp.lat],
                                     settings.angle_deg, center=center)
-        wp_rotated.append((wp, wxs[0], wys[0]))
+        wp_rotated.append((idx, wp, wxs[0], wys[0]))
 
     min_x, max_x = min(xs_rot), max(xs_rot)
     min_y, max_y = min(ys_rot), max(ys_rot)
@@ -118,19 +121,19 @@ def render_map(data: GpxData,
     # 重なりを減らすため、X座標順で高い段・低い段に交互配置する。
     label_band_top = max_y + pad_y * (settings.top_margin - 0.5)
     label_band_step = pad_y * 0.7
-    x_order = sorted(range(len(wp_rotated)), key=lambda i: wp_rotated[i][1])
-    band_rank = {idx: rank for rank, idx in enumerate(x_order)}
+    x_order = sorted(range(len(wp_rotated)), key=lambda i: wp_rotated[i][2])
+    band_rank = {i: rank for rank, i in enumerate(x_order)}
 
     font_kwargs = {"fontname": font} if font else {}
 
     labels: list[LabelItem] = []
-    for i, (wp, x, y) in enumerate(wp_rotated):
+    for i, (idx, wp, x, y) in enumerate(wp_rotated):
         # スポットのマーカー（丸）
         ax.scatter(x, y, s=200, marker="o",
                    c="deepskyblue", edgecolor="navy", zorder=3)
 
         default_y = label_band_top - (band_rank[i] % 2) * label_band_step
-        label_x, label_y = label_positions.get(wp.name, (x, default_y))
+        label_x, label_y = label_positions.get(idx, (x, default_y))
 
         line = ax.plot([x, label_x], [y, label_y],
                        color="orange", linewidth=1, linestyle="--",
@@ -145,7 +148,7 @@ def render_map(data: GpxData,
         )
 
         labels.append(LabelItem(
-            name=wp.name, text=text, line=line,
+            index=idx, name=wp.name, text=text, line=line,
             anchor_x=x, anchor_y=y, arrival_time=wp.arrival_time,
         ))
 

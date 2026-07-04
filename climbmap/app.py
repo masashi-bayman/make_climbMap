@@ -2,10 +2,11 @@
 
 使い方の流れ:
     1. 「GPXを開く」で地名入りGPX（ヤマレコで変換したもの）を読み込む
-    2. 回転・余白を調整（変更すると自動で再描画）
-    3. 地名ラベルをドラッグして位置を微調整
-    4. 必要なら方向矢印を配置
-    5. 「保存」で透過PNGと到着時刻テキストを出力
+    2. 右側のスポット一覧で名前の編集・表示/非表示を切り替える
+    3. 回転・余白を調整（変更すると自動で再描画）
+    4. 地名ラベルをドラッグして位置を微調整
+    5. 必要なら方向矢印を配置
+    6. 「保存」で透過PNGと到着時刻テキストを出力
 """
 
 import os
@@ -33,7 +34,7 @@ class ClimbMapApp:
     def __init__(self, root: tk.Tk, gpx_path: str | None = None):
         self.root = root
         self.root.title("登山マップ作成 - GPX軌跡プレビュー＆スポット到着時刻")
-        self.root.geometry("900x1000")
+        self.root.geometry("1200x1000")
 
         self.font_name = setup_japanese_font()
 
@@ -42,7 +43,8 @@ class ClimbMapApp:
         self.gpx_path: str | None = None
         self.render = None                    # MapRender
         self.canvas_tk = None                 # FigureCanvasTkAgg
-        self.label_positions: dict[str, tuple[float, float]] = {}
+        self.label_positions: dict[int, tuple[float, float]] = {}
+        self.spot_rows: list[dict] = []       # スポット一覧の行ウィジェット情報
 
         # ドラッグ状態
         self._drag_item = None
@@ -132,9 +134,47 @@ class ClimbMapApp:
         self.lbl_status = ttk.Label(self.root, text="GPXファイルを開いてください", anchor="w")
         self.lbl_status.pack(fill="x", padx=5, pady=2)
 
-        # --- 地図表示エリア ---
-        self.panel_img = tk.Frame(self.root, width=600, height=600, bg="black")
-        self.panel_img.pack(fill="both", expand=True, padx=5, pady=5)
+        # --- 中央: 地図（左）＋スポット一覧（右） ---
+        center = ttk.Frame(self.root)
+        center.pack(fill="both", expand=True, padx=5, pady=5)
+
+        self.panel_img = tk.Frame(center, width=600, height=600, bg="black")
+        self.panel_img.pack(side="left", fill="both", expand=True)
+
+        panel_spots = ttk.LabelFrame(center, text="スポット一覧（編集すると地図に反映）",
+                                     padding=5)
+        panel_spots.pack(side="right", fill="y", padx=(5, 0))
+
+        # スクロール可能なスポットリスト
+        self.spot_canvas = tk.Canvas(panel_spots, width=340,
+                                     highlightthickness=0)
+        scrollbar = ttk.Scrollbar(panel_spots, orient="vertical",
+                                  command=self.spot_canvas.yview)
+        self.spot_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.spot_canvas.pack(side="left", fill="both", expand=True)
+
+        self.spot_list_frame = ttk.Frame(self.spot_canvas)
+        self._spot_window = self.spot_canvas.create_window(
+            (0, 0), window=self.spot_list_frame, anchor="nw")
+        self.spot_list_frame.bind(
+            "<Configure>",
+            lambda e: self.spot_canvas.configure(
+                scrollregion=self.spot_canvas.bbox("all")))
+        self.spot_canvas.bind(
+            "<Configure>",
+            lambda e: self.spot_canvas.itemconfigure(
+                self._spot_window, width=e.width))
+
+        # マウスホイールでスクロール（Windows / macOS / Linux）
+        def _on_mousewheel(event):
+            if event.num == 4 or event.delta > 0:
+                self.spot_canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                self.spot_canvas.yview_scroll(1, "units")
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.spot_canvas.bind(seq, _on_mousewheel)
+            self.spot_list_frame.bind(seq, _on_mousewheel)
 
         # --- 到着時刻テキスト ---
         font = (self.font_name, 11) if self.font_name else (None, 11)
@@ -142,7 +182,7 @@ class ClimbMapApp:
         self.text_box.pack(pady=2, padx=5, fill="x")
 
         ttk.Label(self.root,
-                  text="↑ このエリアから到着時刻をコピペできます（保存時にこの内容がテキストファイルになります）"
+                  text="↑ このエリアから到着時刻をコピペできます（スポット編集で自動更新・保存時にこの内容がテキストファイルになります）"
                   ).pack(pady=(0, 4))
 
     def set_status(self, text: str):
@@ -178,16 +218,71 @@ class ClimbMapApp:
                 "（軌跡のみで描画します）",
             )
 
+        self._build_spot_list()
         self.redraw()
-
-        self.text_box.delete("1.0", tk.END)
-        self.text_box.insert(tk.END, format_waypoint_times(data.waypoints))
+        self._refresh_times_text()
 
         self.set_status(
             f"読み込み完了: {os.path.basename(path)}"
             f"（スポット {len(data.waypoints)} 件）"
-            " — ラベルはドラッグで調整できます"
+            " — 右の一覧で名前編集・表示切替、地図上でラベルをドラッグ調整"
         )
+
+    # ===== スポット一覧パネル =====
+
+    def _build_spot_list(self):
+        """スポット一覧の行を作り直す"""
+        for child in self.spot_list_frame.winfo_children():
+            child.destroy()
+        self.spot_rows = []
+
+        if self.gpx_data is None:
+            return
+
+        for idx, wp in enumerate(self.gpx_data.waypoints):
+            row = ttk.Frame(self.spot_list_frame)
+            row.pack(fill="x", pady=1)
+
+            visible_var = tk.BooleanVar(master=self.root, value=wp.visible)
+            check = ttk.Checkbutton(
+                row, variable=visible_var,
+                command=lambda i=idx: self._on_spot_visibility(i))
+            check.pack(side="left")
+
+            name_var = tk.StringVar(master=self.root, value=wp.name)
+            entry = ttk.Entry(row, textvariable=name_var, width=24)
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            entry.bind("<Return>", lambda e, i=idx: self._on_spot_rename(i))
+            entry.bind("<FocusOut>", lambda e, i=idx: self._on_spot_rename(i))
+
+            time_str = wp.arrival_time[-8:] if wp.arrival_time else ""
+            ttk.Label(row, text=time_str).pack(side="right")
+
+            self.spot_rows.append({
+                "visible_var": visible_var,
+                "name_var": name_var,
+            })
+
+    def _on_spot_visibility(self, idx: int):
+        wp = self.gpx_data.waypoints[idx]
+        wp.visible = self.spot_rows[idx]["visible_var"].get()
+        self.redraw()
+        self._refresh_times_text()
+
+    def _on_spot_rename(self, idx: int):
+        wp = self.gpx_data.waypoints[idx]
+        new_name = self.spot_rows[idx]["name_var"].get().strip()
+        if not new_name or new_name == wp.name:
+            return
+        wp.name = new_name
+        self.redraw()
+        self._refresh_times_text()
+
+    def _refresh_times_text(self):
+        if self.gpx_data is None:
+            return
+        self.text_box.delete("1.0", tk.END)
+        self.text_box.insert(tk.END, format_waypoint_times(self.gpx_data.waypoints))
 
     # ===== 描画 =====
 
@@ -320,7 +415,7 @@ class ClimbMapApp:
         if self._drag_item is not None:
             # 位置を記録して、余白変更などの再描画後も維持する
             x, y = self._drag_item.text.get_position()
-            self.label_positions[self._drag_item.name] = (x, y)
+            self.label_positions[self._drag_item.index] = (x, y)
         self._drag_item = None
 
     # ===== 矢印 =====
