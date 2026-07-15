@@ -56,6 +56,7 @@ class ClimbMapApp:
 
         # 設定変数
         self.rotation_var = tk.IntVar(master=root, value=0)
+        self.compass_var = tk.BooleanVar(master=root, value=False)
         self.arrow_x_var = tk.StringVar(master=root, value="")
         self.arrow_y_var = tk.StringVar(master=root, value="")
         self.arrow_angle_var = tk.StringVar(master=root, value="0")
@@ -108,6 +109,9 @@ class ClimbMapApp:
                   ).pack(side="left", padx=2)
         ttk.Button(frame_view, text="リセット",
                    command=self.reset_view).pack(side="left", padx=2)
+        ttk.Checkbutton(frame_view, text="方位記号(N)",
+                        variable=self.compass_var,
+                        command=self.redraw).pack(side="left", padx=4)
 
         # --- 矢印 ---
         frame_arrow = ttk.LabelFrame(controls, text="方向矢印", padding=5)
@@ -291,6 +295,7 @@ class ClimbMapApp:
             angle_deg=self.rotation_var.get(),
             arrow=self._current_arrow(),
             view=self.view,
+            show_compass=self.compass_var.get(),
         )
 
     def _current_arrow(self) -> Arrow | None:

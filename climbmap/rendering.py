@@ -37,7 +37,7 @@ class RenderSettings:
     # 表示範囲 (x_min, x_max, y_min, y_max)。None なら余白から自動計算。
     # GUIのドラッグ移動・ホイール拡縮で調整した範囲を再描画後も維持するために使う。
     view: tuple[float, float, float, float] | None = None
-    show_compass: bool = True   # 方位記号（N）を表示するか
+    show_compass: bool = False  # 方位記号（N）を左下に表示するか
 
 
 @dataclass
