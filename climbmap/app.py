@@ -48,10 +48,11 @@ class ClimbMapApp:
         # 表示範囲 (x_min, x_max, y_min, y_max)。Noneなら自動
         self.view: tuple[float, float, float, float] | None = None
 
-        # ドラッグ状態（ラベル移動／地図の移動）
+        # ドラッグ状態（ラベル移動／地図の移動／端ドラッグでの余白調整）
         self._drag_item = None
         self._drag_offset = (0.0, 0.0)
-        self._pan_start = None  # (px, py, xlim, ylim)
+        self._pan_start = None   # (px, py, xlim, ylim)
+        self._edge_drag = None   # (edges, lims, bbox) 端ドラッグ中の情報
 
         # 設定変数
         self.rotation_var = tk.IntVar(master=root, value=0)
@@ -102,7 +103,8 @@ class ClimbMapApp:
         frame_view = ttk.LabelFrame(controls, text="表示範囲", padding=5)
         frame_view.pack(side="left", padx=3, fill="y")
 
-        ttk.Label(frame_view, text="ドラッグ: 移動 / ホイール: 拡大縮小"
+        ttk.Label(frame_view,
+                  text="ドラッグ: 移動 / 端をドラッグ: 余白調整 / ホイール: 拡縮"
                   ).pack(side="left", padx=2)
         ttk.Button(frame_view, text="リセット",
                    command=self.reset_view).pack(side="left", padx=2)
@@ -320,6 +322,7 @@ class ClimbMapApp:
         # 古いキャンバスへのドラッグ状態を引きずらない
         self._drag_item = None
         self._pan_start = None
+        self._edge_drag = None
 
         self.render = render_map(
             self.gpx_data, settings,
@@ -380,13 +383,51 @@ class ClimbMapApp:
 
     # ===== マウス操作（ラベルのドラッグ／地図の移動・拡縮） =====
 
+    # キャンバス端の「つかめる」幅（ピクセル）
+    EDGE_GRAB_PX = 14
+
+    def _edges_at(self, event) -> set:
+        """カーソルがキャンバスのどの端の近くにあるかを返す"""
+        if self.render is None or event.x is None or event.y is None:
+            return set()
+        bb = self.render.ax.bbox
+        t = self.EDGE_GRAB_PX
+        if not (bb.x0 - t <= event.x <= bb.x1 + t and
+                bb.y0 - t <= event.y <= bb.y1 + t):
+            return set()
+        edges = set()
+        if abs(event.x - bb.x0) < t:
+            edges.add("left")
+        if abs(event.x - bb.x1) < t:
+            edges.add("right")
+        if abs(event.y - bb.y0) < t:
+            edges.add("bottom")
+        if abs(event.y - bb.y1) < t:
+            edges.add("top")
+        return edges
+
     def _on_press(self, event):
-        if event.inaxes is None or self.render is None:
+        if self.render is None:
             return
         if event.x is None or event.y is None:
             return
 
-        # まずラベルへのヒットを判定（ラベルのドラッグを優先）
+        # キャンバスの端なら余白調整ドラッグ（軸の外側でもつかめる）
+        edges = self._edges_at(event)
+        if edges:
+            ax = self.render.ax
+            bb = ax.bbox
+            self._edge_drag = (
+                edges,
+                (*ax.get_xlim(), *ax.get_ylim()),
+                (bb.x0, bb.x1, bb.y0, bb.y1),
+            )
+            return
+
+        if event.inaxes is None:
+            return
+
+        # ラベルへのヒットを判定（ラベルのドラッグを優先）
         renderer = event.canvas.get_renderer()
         for item in self.render.labels:
             bbox = item.text.get_window_extent(renderer)
@@ -405,8 +446,58 @@ class ClimbMapApp:
     def _on_motion(self, event):
         if self._drag_item is not None:
             self._move_label(event)
+        elif self._edge_drag is not None:
+            self._resize_edges(event)
         elif self._pan_start is not None:
             self._pan_map(event)
+        else:
+            self._update_cursor(event)
+
+    def _update_cursor(self, event):
+        """端の近くではリサイズカーソルにして、つかめることを示す"""
+        if self.canvas_tk is None:
+            return
+        edges = self._edges_at(event)
+        if {"left", "right"} & edges and {"top", "bottom"} & edges:
+            cursor = "sizing"
+        elif {"left", "right"} & edges:
+            cursor = "sb_h_double_arrow"
+        elif {"top", "bottom"} & edges:
+            cursor = "sb_v_double_arrow"
+        else:
+            cursor = ""
+        widget = self.canvas_tk.get_tk_widget()
+        if widget.cget("cursor") != cursor:
+            widget.config(cursor=cursor)
+
+    def _resize_edges(self, event):
+        """キャンバス端のドラッグで表示範囲（余白）を調整する"""
+        if event.x is None or event.y is None:
+            return
+        edges, (x_min, x_max, y_min, y_max), (bx0, bx1, by0, by1) = self._edge_drag
+        ax = self.render.ax
+
+        # ドラッグ開始時の座標系でピクセル→データ座標に変換
+        data_x = x_min + (event.x - bx0) * (x_max - x_min) / (bx1 - bx0)
+        data_y = y_min + (event.y - by0) * (y_max - y_min) / (by1 - by0)
+
+        min_w = (x_max - x_min) * 0.05
+        min_h = (y_max - y_min) * 0.05
+
+        new_x_min, new_x_max = x_min, x_max
+        new_y_min, new_y_max = y_min, y_max
+        if "left" in edges:
+            new_x_min = min(data_x, x_max - min_w)
+        if "right" in edges:
+            new_x_max = max(data_x, x_min + min_w)
+        if "bottom" in edges:
+            new_y_min = min(data_y, y_max - min_h)
+        if "top" in edges:
+            new_y_max = max(data_y, y_min + min_h)
+
+        ax.set_xlim(new_x_min, new_x_max)
+        ax.set_ylim(new_y_min, new_y_max)
+        event.canvas.draw_idle()
 
     def _move_label(self, event):
         item = self._drag_item
@@ -449,6 +540,9 @@ class ClimbMapApp:
             self._drag_item = None
         if self._pan_start is not None:
             self._pan_start = None
+            self._save_current_view()
+        if self._edge_drag is not None:
+            self._edge_drag = None
             self._save_current_view()
 
     def _on_scroll(self, event):
