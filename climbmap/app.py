@@ -11,6 +11,7 @@
 
 import os
 import sys
+import webbrowser
 from datetime import datetime
 
 import tkinter as tk
@@ -25,6 +26,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from .fonts import setup_japanese_font
 from .gpx import GpxData, format_waypoint_times, parse_gpx
 from .rendering import Arrow, RenderSettings, render_map, save_png
+from .settings import load_settings, save_settings
 
 # ラベルドラッグ時、マーカーのX座標にスナップする距離（表示幅に対する比率）
 SNAP_RATIO = 0.005
@@ -37,6 +39,7 @@ class ClimbMapApp:
         self.root.geometry("1200x1000")
 
         self.font_name = setup_japanese_font()
+        self.settings = load_settings()
 
         # データ・描画状態
         self.gpx_data: GpxData | None = None
@@ -83,6 +86,19 @@ class ClimbMapApp:
                    command=self.open_gpx).pack(side="left", padx=2)
         ttk.Button(frame_file, text="保存",
                    command=self.save_outputs).pack(side="left", padx=2)
+
+        # --- 外部サイトへのリンク（GPXの入手・地名付与） ---
+        frame_links = ttk.LabelFrame(controls, text="サイトを開く", padding=5)
+        frame_links.pack(side="left", padx=3, fill="y")
+
+        ttk.Button(frame_links, text="YAMAP",
+                   command=lambda: self.open_url("yamap_url")
+                   ).pack(side="left", padx=2)
+        ttk.Button(frame_links, text="ヤマレコ",
+                   command=lambda: self.open_url("yamareco_url")
+                   ).pack(side="left", padx=2)
+        ttk.Button(frame_links, text="URL設定",
+                   command=self.edit_links).pack(side="left", padx=2)
 
         # --- 回転 ---
         frame_rot = ttk.LabelFrame(controls, text="回転（度）", padding=5)
@@ -190,6 +206,66 @@ class ClimbMapApp:
 
     def set_status(self, text: str):
         self.lbl_status.config(text=text)
+
+    # ===== 外部サイトへのリンク =====
+
+    def open_url(self, key: str):
+        """設定されたURLを既定のブラウザで開く"""
+        url = self.settings.get(key, "").strip()
+        if not url:
+            messagebox.showinfo("情報", "URLが設定されていません。「URL設定」から入力してください。")
+            return
+        webbrowser.open(url)
+        self.set_status(f"ブラウザで開きました: {url}")
+
+    def edit_links(self):
+        """YAMAP / ヤマレコのリンク先URLを編集して保存する"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("リンクURLの設定")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        ttk.Label(
+            dialog,
+            text="各ボタンで開くURLを設定します。\n"
+                 "自分のマイページや活動日記のURLを貼り付けてください。",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 6), sticky="w")
+
+        yamap_var = tk.StringVar(master=dialog, value=self.settings["yamap_url"])
+        yamareco_var = tk.StringVar(master=dialog,
+                                    value=self.settings["yamareco_url"])
+
+        for i, (label, var) in enumerate((("YAMAP", yamap_var),
+                                          ("ヤマレコ", yamareco_var)), start=1):
+            ttk.Label(dialog, text=label).grid(row=i, column=0,
+                                               padx=(10, 4), pady=3, sticky="e")
+            ttk.Entry(dialog, textvariable=var, width=55).grid(
+                row=i, column=1, padx=(0, 10), pady=3)
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=3, column=0, columnspan=2, pady=(6, 10))
+
+        def apply_and_close():
+            self.settings["yamap_url"] = yamap_var.get().strip()
+            self.settings["yamareco_url"] = yamareco_var.get().strip()
+            save_settings(self.settings)
+            dialog.destroy()
+            self.set_status("リンクURLを保存しました")
+
+        def restore_defaults():
+            from .settings import DEFAULTS
+            yamap_var.set(DEFAULTS["yamap_url"])
+            yamareco_var.set(DEFAULTS["yamareco_url"])
+
+        ttk.Button(buttons, text="保存", command=apply_and_close
+                   ).pack(side="left", padx=4)
+        ttk.Button(buttons, text="初期値に戻す", command=restore_defaults
+                   ).pack(side="left", padx=4)
+        ttk.Button(buttons, text="キャンセル", command=dialog.destroy
+                   ).pack(side="left", padx=4)
+
+        dialog.grab_set()
 
     # ===== GPX読み込み =====
 
