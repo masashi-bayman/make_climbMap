@@ -42,12 +42,13 @@ class RenderSettings:
 
 @dataclass
 class LabelItem:
-    """描画済みの地名ラベル（ドラッグ調整用に artist を保持）"""
+    """描画済みの地名スポット（ドラッグ調整用に artist を保持）"""
 
     index: int            # data.waypoints 内でのインデックス
     name: str
     text: object          # matplotlib.text.Text
     line: object          # matplotlib.lines.Line2D（マーカーとラベルを結ぶ線）
+    marker: object        # matplotlib.collections.PathCollection（青丸）
     anchor_x: float       # マーカー位置（プロット座標）
     anchor_y: float
     arrival_time: str
@@ -60,6 +61,9 @@ class MapRender:
     figure: Figure
     ax: object
     labels: list[LabelItem] = field(default_factory=list)
+    # 回転の中心と角度。プロット座標を元の緯度経度へ戻す際に使う。
+    center: tuple[float, float] = (0.0, 0.0)
+    angle_deg: float = 0.0
 
 
 def render_map(data: GpxData,
@@ -87,7 +91,7 @@ def render_map(data: GpxData,
     for idx, wp in enumerate(data.waypoints):
         if not wp.visible:
             continue
-        wxs, wys, _ = rotate_points([wp.lon], [wp.lat],
+        wxs, wys, _ = rotate_points([wp.plot_lon], [wp.plot_lat],
                                     settings.angle_deg, center=center)
         wp_rotated.append((idx, wp, wxs[0], wys[0]))
 
@@ -136,8 +140,8 @@ def render_map(data: GpxData,
     labels: list[LabelItem] = []
     for i, (idx, wp, x, y) in enumerate(wp_rotated):
         # スポットのマーカー（丸）
-        ax.scatter(x, y, s=200, marker="o",
-                   c="deepskyblue", edgecolor="navy", zorder=3)
+        marker = ax.scatter(x, y, s=200, marker="o",
+                            c="deepskyblue", edgecolor="navy", zorder=3)
 
         default_y = label_band_top - (band_rank[i] % 2) * label_band_step
         label_x, label_y = label_positions.get(idx, (x, default_y))
@@ -155,7 +159,7 @@ def render_map(data: GpxData,
         )
 
         labels.append(LabelItem(
-            index=idx, name=wp.name, text=text, line=line,
+            index=idx, name=wp.name, text=text, line=line, marker=marker,
             anchor_x=x, anchor_y=y, arrival_time=wp.arrival_time,
         ))
 
@@ -169,7 +173,8 @@ def render_map(data: GpxData,
     ax.set_axis_off()
     fig.tight_layout()
 
-    return MapRender(figure=fig, ax=ax, labels=labels)
+    return MapRender(figure=fig, ax=ax, labels=labels,
+                     center=center, angle_deg=settings.angle_deg)
 
 
 def _draw_compass(ax, angle_deg: float):

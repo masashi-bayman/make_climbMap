@@ -25,10 +25,33 @@ class Waypoint:
     """地名スポット（GPX上のウェイポイント）"""
 
     name: str
-    lat: float
+    lat: float          # GPX上の実際の座標（到着時刻の算出に使用済み）
     lon: float
     arrival_time: str = ""  # 'YYYY-MM-DD HH:MM:SS' (JST)
     visible: bool = True    # 地図に表示するか（GUIの一覧で切り替え）
+    # マーカーをドラッグで動かしたときの表示用座標（回転前の座標系）。
+    # Noneなら実際の座標に描画する。
+    moved_lat: float | None = None
+    moved_lon: float | None = None
+
+    @property
+    def plot_lat(self) -> float:
+        """描画に使う緯度（移動していれば移動後）"""
+        return self.lat if self.moved_lat is None else self.moved_lat
+
+    @property
+    def plot_lon(self) -> float:
+        """描画に使う経度（移動していれば移動後）"""
+        return self.lon if self.moved_lon is None else self.moved_lon
+
+    @property
+    def is_moved(self) -> bool:
+        return self.moved_lat is not None or self.moved_lon is not None
+
+    def reset_position(self):
+        """マーカー位置をGPX上の実際の座標に戻す"""
+        self.moved_lat = None
+        self.moved_lon = None
 
 
 @dataclass

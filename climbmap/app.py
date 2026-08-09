@@ -25,11 +25,15 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from .fonts import setup_japanese_font
 from .gpx import GpxData, format_waypoint_times, parse_gpx
+from .geometry import rotate_points
 from .rendering import Arrow, RenderSettings, render_map, save_png
 from .settings import load_settings, save_settings
 
 # ラベルドラッグ時、マーカーのX座標にスナップする距離（表示幅に対する比率）
 SNAP_RATIO = 0.005
+
+# マーカー（青丸）をつかめる距離（ピクセル）
+MARKER_GRAB_PX = 14
 
 
 class ClimbMapApp:
@@ -51,11 +55,12 @@ class ClimbMapApp:
         # 表示範囲 (x_min, x_max, y_min, y_max)。Noneなら自動
         self.view: tuple[float, float, float, float] | None = None
 
-        # ドラッグ状態（ラベル移動／地図の移動／端ドラッグでの余白調整）
+        # ドラッグ状態（ラベル移動／マーカー移動／地図の移動／端での余白調整）
         self._drag_item = None
         self._drag_offset = (0.0, 0.0)
-        self._pan_start = None   # (px, py, xlim, ylim)
-        self._edge_drag = None   # (edges, lims, bbox) 端ドラッグ中の情報
+        self._marker_item = None  # ドラッグ中のマーカー
+        self._pan_start = None    # (px, py, xlim, ylim)
+        self._edge_drag = None    # (edges, lims, bbox) 端ドラッグ中の情報
 
         # 設定変数
         self.rotation_var = tk.IntVar(master=root, value=0)
@@ -163,6 +168,11 @@ class ClimbMapApp:
         panel_spots = ttk.LabelFrame(center, text="スポット一覧（編集すると地図に反映）",
                                      padding=5)
         panel_spots.pack(side="right", fill="y", padx=(5, 0))
+
+        spot_tools = ttk.Frame(panel_spots)
+        spot_tools.pack(side="top", fill="x", pady=(0, 4))
+        ttk.Button(spot_tools, text="マーカー位置を全て戻す",
+                   command=self.reset_all_marker_positions).pack(side="left")
 
         # スクロール可能なスポットリスト
         self.spot_canvas = tk.Canvas(panel_spots, width=340,
@@ -305,7 +315,7 @@ class ClimbMapApp:
         self.set_status(
             f"読み込み完了: {os.path.basename(path)}"
             f"（スポット {len(data.waypoints)} 件）"
-            " — 右の一覧で名前編集・表示切替、地図上でラベルをドラッグ調整"
+            " — 右の一覧で名前編集・表示切替、地図上でラベルと青丸をドラッグ調整"
         )
 
     # ===== スポット一覧パネル =====
@@ -338,10 +348,27 @@ class ClimbMapApp:
             time_str = wp.arrival_time[-8:] if wp.arrival_time else ""
             ttk.Label(row, text=time_str).pack(side="right")
 
+            # マーカーを動かしたときだけ「戻す」ボタンを出す
+            reset_btn = ttk.Button(
+                row, text="戻す", width=5,
+                command=lambda i=idx: self.reset_marker_position(i))
+
             self.spot_rows.append({
                 "visible_var": visible_var,
                 "name_var": name_var,
+                "reset_btn": reset_btn,
             })
+            self._update_spot_row_state(idx)
+
+    def _update_spot_row_state(self, idx: int):
+        """行の「戻す」ボタンの表示を、マーカー移動の有無に合わせる"""
+        if idx >= len(self.spot_rows):
+            return
+        btn = self.spot_rows[idx]["reset_btn"]
+        if self.gpx_data.waypoints[idx].is_moved:
+            btn.pack(side="right", padx=(2, 4))
+        else:
+            btn.pack_forget()
 
     def _on_spot_visibility(self, idx: int):
         wp = self.gpx_data.waypoints[idx]
@@ -402,6 +429,7 @@ class ClimbMapApp:
 
         # 古いキャンバスへのドラッグ状態を引きずらない
         self._drag_item = None
+        self._marker_item = None
         self._pan_start = None
         self._edge_drag = None
 
@@ -520,13 +548,36 @@ class ClimbMapApp:
                 self._drag_offset = (x0 - event.xdata, y0 - event.ydata)
                 return
 
-        # ラベル以外をつかんだら地図の移動（パン）
+        # マーカー（青丸）をつかんだら位置の移動
+        marker = self._marker_at(event)
+        if marker is not None:
+            self._marker_item = marker
+            return
+
+        # どれでもなければ地図の移動（パン）
         ax = self.render.ax
         self._pan_start = (event.x, event.y, ax.get_xlim(), ax.get_ylim())
+
+    def _marker_at(self, event):
+        """カーソル位置にあるマーカーを返す（無ければ None）"""
+        if self.render is None or event.x is None or event.y is None:
+            return None
+        hit = None
+        best = MARKER_GRAB_PX ** 2
+        for item in self.render.labels:
+            px, py = self.render.ax.transData.transform(
+                (item.anchor_x, item.anchor_y))
+            d2 = (px - event.x) ** 2 + (py - event.y) ** 2
+            if d2 <= best:
+                best = d2
+                hit = item
+        return hit
 
     def _on_motion(self, event):
         if self._drag_item is not None:
             self._move_label(event)
+        elif self._marker_item is not None:
+            self._move_marker(event)
         elif self._edge_drag is not None:
             self._resize_edges(event)
         elif self._pan_start is not None:
@@ -545,6 +596,8 @@ class ClimbMapApp:
             cursor = "sb_h_double_arrow"
         elif {"top", "bottom"} & edges:
             cursor = "sb_v_double_arrow"
+        elif self._marker_at(event) is not None:
+            cursor = "hand2"
         else:
             cursor = ""
         widget = self.canvas_tk.get_tk_widget()
@@ -600,6 +653,22 @@ class ClimbMapApp:
         item.line.set_data([item.anchor_x, new_x], [item.anchor_y, new_y])
         event.canvas.draw_idle()
 
+    def _move_marker(self, event):
+        """マーカー（青丸）をドラッグで移動し、引き出し線を追従させる"""
+        item = self._marker_item
+        if event.inaxes is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        item.anchor_x = event.xdata
+        item.anchor_y = event.ydata
+        item.marker.set_offsets([[item.anchor_x, item.anchor_y]])
+
+        label_x, label_y = item.text.get_position()
+        item.line.set_data([item.anchor_x, label_x], [item.anchor_y, label_y])
+        event.canvas.draw_idle()
+
     def _pan_map(self, event):
         if event.x is None or event.y is None:
             return
@@ -619,12 +688,49 @@ class ClimbMapApp:
             x, y = self._drag_item.text.get_position()
             self.label_positions[self._drag_item.index] = (x, y)
             self._drag_item = None
+        if self._marker_item is not None:
+            self._store_marker_position(self._marker_item)
+            self._marker_item = None
         if self._pan_start is not None:
             self._pan_start = None
             self._save_current_view()
         if self._edge_drag is not None:
             self._edge_drag = None
             self._save_current_view()
+
+    def _store_marker_position(self, item):
+        """マーカーの表示位置を回転前の座標に戻して記録する。
+
+        回転前の座標系で持つことで、回転角を変えても移動が保たれる。
+        """
+        lons, lats, _ = rotate_points(
+            [item.anchor_x], [item.anchor_y],
+            -self.render.angle_deg, center=self.render.center,
+        )
+        wp = self.gpx_data.waypoints[item.index]
+        wp.moved_lon = lons[0]
+        wp.moved_lat = lats[0]
+        self._update_spot_row_state(item.index)
+        self.set_status(
+            f"「{wp.name}」のマーカーを移動しました"
+            "（一覧の「戻す」で元の位置に復帰）"
+        )
+
+    def reset_marker_position(self, idx: int):
+        """1件のマーカー位置をGPX上の座標に戻す"""
+        self.gpx_data.waypoints[idx].reset_position()
+        self._update_spot_row_state(idx)
+        self.redraw()
+
+    def reset_all_marker_positions(self):
+        """すべてのマーカー位置をGPX上の座標に戻す"""
+        if self.gpx_data is None:
+            return
+        for idx, wp in enumerate(self.gpx_data.waypoints):
+            wp.reset_position()
+            self._update_spot_row_state(idx)
+        self.redraw()
+        self.set_status("すべてのマーカー位置を元に戻しました")
 
     def _on_scroll(self, event):
         """マウスホイールで拡大縮小（カーソル位置を中心に）"""
