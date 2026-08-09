@@ -10,6 +10,7 @@
 """
 
 import os
+import subprocess
 import sys
 import webbrowser
 from datetime import datetime
@@ -36,6 +37,29 @@ SNAP_RATIO = 0.005
 MARKER_GRAB_PX = 14
 
 
+def reveal_in_file_manager(path: str):
+    """ファイルマネージャでパスを開く。
+
+    ファイルを指定した場合、可能ならそのファイルを選択した状態で開く
+    （Windowsのエクスプローラー、macOSのFinder）。
+    """
+    path = os.path.normpath(os.path.abspath(path))
+    is_file = os.path.isfile(path)
+
+    if sys.platform == "win32":
+        if is_file:
+            # explorer は成功時も終了コード1を返すため、結果は判定しない
+            subprocess.run(f'explorer /select,"{path}"')
+        else:
+            os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", "-R", path] if is_file else ["open", path],
+                       check=True)
+    else:
+        target = os.path.dirname(path) if is_file else path
+        subprocess.run(["xdg-open", target], check=True)
+
+
 class ClimbMapApp:
     def __init__(self, root: tk.Tk, gpx_path: str | None = None):
         self.root = root
@@ -48,6 +72,7 @@ class ClimbMapApp:
         # データ・描画状態
         self.gpx_data: GpxData | None = None
         self.gpx_path: str | None = None
+        self.last_saved_path: str | None = None   # 直近に保存した画像のパス
         self.render = None                    # MapRender
         self.canvas_tk = None                 # FigureCanvasTkAgg
         self.label_positions: dict[int, tuple[float, float]] = {}
@@ -80,20 +105,25 @@ class ClimbMapApp:
     # ===== UI構築 =====
 
     def _build_ui(self):
-        controls = ttk.Frame(self.root, padding=5)
-        controls.pack(side="top", fill="x")
+        # 横に広がりすぎないよう、操作パネルは2段に分ける
+        row1 = ttk.Frame(self.root, padding=(5, 5, 5, 0))
+        row1.pack(side="top", fill="x")
+        row2 = ttk.Frame(self.root, padding=(5, 3, 5, 0))
+        row2.pack(side="top", fill="x")
 
-        # --- ファイル・保存 ---
-        frame_file = ttk.LabelFrame(controls, text="ファイル", padding=5)
+        # --- 1段目: ファイル・保存 ---
+        frame_file = ttk.LabelFrame(row1, text="ファイル", padding=5)
         frame_file.pack(side="left", padx=3, fill="y")
 
         ttk.Button(frame_file, text="GPXを開く",
                    command=self.open_gpx).pack(side="left", padx=2)
         ttk.Button(frame_file, text="保存",
                    command=self.save_outputs).pack(side="left", padx=2)
+        ttk.Button(frame_file, text="保存先を開く",
+                   command=self.open_output_folder).pack(side="left", padx=2)
 
-        # --- 外部サイトへのリンク（GPXの入手・地名付与） ---
-        frame_links = ttk.LabelFrame(controls, text="サイトを開く", padding=5)
+        # --- 1段目: 外部サイトへのリンク（GPXの入手・地名付与） ---
+        frame_links = ttk.LabelFrame(row1, text="サイトを開く", padding=5)
         frame_links.pack(side="left", padx=3, fill="y")
 
         ttk.Button(frame_links, text="YAMAP",
@@ -105,8 +135,18 @@ class ClimbMapApp:
         ttk.Button(frame_links, text="URL設定",
                    command=self.edit_links).pack(side="left", padx=2)
 
-        # --- 回転 ---
-        frame_rot = ttk.LabelFrame(controls, text="回転（度）", padding=5)
+        # --- 1段目: 表示範囲 ---
+        frame_view = ttk.LabelFrame(row1, text="表示範囲", padding=5)
+        frame_view.pack(side="left", padx=3, fill="y")
+
+        ttk.Button(frame_view, text="リセット",
+                   command=self.reset_view).pack(side="left", padx=2)
+        ttk.Checkbutton(frame_view, text="方位記号(N)",
+                        variable=self.compass_var,
+                        command=self.redraw).pack(side="left", padx=4)
+
+        # --- 2段目: 回転 ---
+        frame_rot = ttk.LabelFrame(row2, text="回転（度）", padding=5)
         frame_rot.pack(side="left", padx=3, fill="y")
 
         for ang in (0, 90, 180, 270):
@@ -121,21 +161,8 @@ class ClimbMapApp:
         ttk.Button(frame_rot, text="適用",
                    command=self.apply_custom_rotation).pack(side="left", padx=1)
 
-        # --- 表示範囲 ---
-        frame_view = ttk.LabelFrame(controls, text="表示範囲", padding=5)
-        frame_view.pack(side="left", padx=3, fill="y")
-
-        ttk.Label(frame_view,
-                  text="ドラッグ: 移動 / 端をドラッグ: 余白調整 / ホイール: 拡縮"
-                  ).pack(side="left", padx=2)
-        ttk.Button(frame_view, text="リセット",
-                   command=self.reset_view).pack(side="left", padx=2)
-        ttk.Checkbutton(frame_view, text="方位記号(N)",
-                        variable=self.compass_var,
-                        command=self.redraw).pack(side="left", padx=4)
-
-        # --- 矢印 ---
-        frame_arrow = ttk.LabelFrame(controls, text="方向矢印", padding=5)
+        # --- 2段目: 矢印 ---
+        frame_arrow = ttk.LabelFrame(row2, text="方向矢印", padding=5)
         frame_arrow.pack(side="left", padx=3, fill="y")
 
         ttk.Button(frame_arrow, text="位置をクリックで指定",
@@ -153,6 +180,14 @@ class ClimbMapApp:
         entry_angle.bind("<Return>", lambda e: self.redraw())
         ttk.Button(frame_arrow, text="消去",
                    command=self.clear_arrow).pack(side="left", padx=2)
+
+        # --- 地図の操作方法（常時表示のヒント） ---
+        ttk.Label(
+            self.root,
+            text="地図の操作　ラベル/青丸: ドラッグで移動　余白: 端をドラッグ"
+                 "　全体: ドラッグで移動・ホイールで拡大縮小",
+            anchor="w", foreground="gray30",
+        ).pack(fill="x", padx=8, pady=(3, 0))
 
         # --- ステータスバー ---
         self.lbl_status = ttk.Label(self.root, text="GPXファイルを開いてください", anchor="w")
@@ -814,11 +849,34 @@ class ClimbMapApp:
             messagebox.showerror("エラー", f"保存中に問題が発生しました\n{e}")
             return
 
+        self.last_saved_path = img_path
         self.set_status(f"保存しました: {img_path}")
-        messagebox.showinfo(
+
+        if messagebox.askyesno(
             "保存完了",
-            f"画像: {img_path}\nテキスト: {text_path}",
-        )
+            f"画像: {img_path}\nテキスト: {text_path}\n\n保存先のフォルダを開きますか？",
+        ):
+            self.open_output_folder()
+
+    def open_output_folder(self):
+        """保存先フォルダをファイルマネージャで開く。
+
+        保存済みならその画像を選択した状態で、未保存ならGPXのある場所を開く。
+        """
+        target = self.last_saved_path
+        if target is None or not os.path.exists(target):
+            if self.gpx_path is None:
+                messagebox.showinfo(
+                    "情報", "先にGPXファイルを開くか、画像を保存してください")
+                return
+            target = os.path.dirname(os.path.abspath(self.gpx_path))
+
+        try:
+            reveal_in_file_manager(target)
+        except Exception as e:
+            messagebox.showerror("エラー", f"フォルダを開けませんでした\n{e}")
+            return
+        self.set_status(f"フォルダを開きました: {target}")
 
 
 def main():
