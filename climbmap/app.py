@@ -29,6 +29,7 @@ from .gpx import GpxData, format_waypoint_times, parse_gpx
 from .geometry import rotate_points
 from .rendering import Arrow, RenderSettings, render_map, save_png
 from .settings import load_settings, save_settings
+from .yamap import build_waypoints, parse_checkpoints
 
 # ラベルドラッグ時、マーカーのX座標にスナップする距離（表示幅に対する比率）
 SNAP_RATIO = 0.005
@@ -121,6 +122,13 @@ class ClimbMapApp:
                    command=self.save_outputs).pack(side="left", padx=2)
         ttk.Button(frame_file, text="保存先を開く",
                    command=self.open_output_folder).pack(side="left", padx=2)
+
+        # --- 1段目: YAMAPのチェックポイントからスポットを作る ---
+        frame_yamap = ttk.LabelFrame(row1, text="スポット作成", padding=5)
+        frame_yamap.pack(side="left", padx=3, fill="y")
+
+        ttk.Button(frame_yamap, text="YAMAPのチェックポイントから作成",
+                   command=self.open_yamap_import).pack(side="left", padx=2)
 
         # --- 1段目: 外部サイトへのリンク（GPXの入手・地名付与） ---
         frame_links = ttk.LabelFrame(row1, text="サイトを開く", padding=5)
@@ -335,23 +343,136 @@ class ClimbMapApp:
         self.label_positions = {}
         self.view = None
 
-        if not data.waypoints:
-            messagebox.showwarning(
-                "地名がありません",
-                "このGPXには地名（ウェイポイント）が含まれていません。\n"
-                "ヤマレコで地名入りGPXに変換してから読み込んでください。\n"
-                "（軌跡のみで描画します）",
-            )
-
         self._build_spot_list()
         self.redraw()
         self._refresh_times_text()
 
-        self.set_status(
-            f"読み込み完了: {os.path.basename(path)}"
-            f"（スポット {len(data.waypoints)} 件）"
-            " — 右の一覧で名前編集・表示切替、地図上でラベルと青丸をドラッグ調整"
-        )
+        if data.waypoints:
+            self.set_status(
+                f"読み込み完了: {os.path.basename(path)}"
+                f"（スポット {len(data.waypoints)} 件）"
+                " — 右の一覧で名前編集・表示切替、地図上でラベルと青丸をドラッグ調整"
+            )
+        else:
+            # YAMAPから直接ダウンロードしたGPXには地名が入っていない。
+            # チェックポイントの貼り付けか、ヤマレコ経由の地名付与で作成できる。
+            self.set_status(
+                f"読み込み完了: {os.path.basename(path)}"
+                "（地名なし）— 「YAMAPのチェックポイントから作成」で"
+                "スポットを追加できます"
+            )
+
+    # ===== YAMAPのチェックポイントからスポットを作成 =====
+
+    def open_yamap_import(self):
+        """貼り付けたチェックポイントからスポットを作るダイアログを開く"""
+        if self.gpx_data is None:
+            messagebox.showinfo("情報", "先にGPXファイルを開いてください")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("YAMAPのチェックポイントからスポットを作成")
+        dialog.transient(self.root)
+        dialog.geometry("720x620")
+
+        ttk.Label(
+            dialog, justify="left",
+            text="YAMAPの活動日記にあるチェックポイント（コースタイム）欄を\n"
+                 "そのままコピーして、下の欄に貼り付けてください。\n"
+                 "時刻をもとにGPXの軌跡から座標を割り出してスポットを作ります。",
+        ).pack(anchor="w", padx=10, pady=(10, 6))
+
+        paste_font = (self.font_name, 10) if self.font_name else (None, 10)
+        text_input = tk.Text(dialog, height=10, font=paste_font)
+        text_input.pack(fill="both", expand=True, padx=10)
+        text_input.focus_set()
+
+        ttk.Button(dialog, text="解析する",
+                   command=lambda: run_parse()).pack(anchor="w", padx=10, pady=6)
+
+        preview_frame = ttk.LabelFrame(dialog, text="作成されるスポット", padding=5)
+        preview_frame.pack(fill="both", expand=True, padx=10)
+
+        columns = ("time", "category", "name")
+        tree = ttk.Treeview(preview_frame, columns=columns, show="headings",
+                            height=8)
+        for col, title, width in (("time", "時刻", 70),
+                                  ("category", "種別", 80),
+                                  ("name", "スポット名", 400)):
+            tree.heading(col, text=title)
+            tree.column(col, width=width, anchor="w")
+        tree_scroll = ttk.Scrollbar(preview_frame, orient="vertical",
+                                    command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        lbl_result = ttk.Label(dialog, text="", anchor="w", justify="left")
+        lbl_result.pack(fill="x", padx=10, pady=4)
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+
+        parsed: dict = {"waypoints": []}
+
+        def run_parse():
+            text = text_input.get("1.0", tk.END)
+            checkpoints = parse_checkpoints(text)
+            tree.delete(*tree.get_children())
+            parsed["waypoints"] = []
+
+            if not checkpoints:
+                lbl_result.config(
+                    text="チェックポイントを読み取れませんでした。"
+                         "時刻とスポット名を含む形でコピーしてください。")
+                return
+
+            try:
+                waypoints, warnings = build_waypoints(self.gpx_data, checkpoints)
+            except ValueError as e:
+                lbl_result.config(text=str(e))
+                return
+
+            for wp in waypoints:
+                tree.insert("", "end", values=(wp.arrival_time[-8:-3], "", wp.name))
+            # 種別は解析結果から補う（作成対象と同じ並び）
+            named = [cp for cp in checkpoints if cp.time]
+            for item, cp in zip(tree.get_children(), named):
+                tree.set(item, "category", cp.category)
+
+            parsed["waypoints"] = waypoints
+            message = f"{len(waypoints)} 件のスポットを作成できます。"
+            if warnings:
+                message += "\n注意: " + " / ".join(warnings)
+            lbl_result.config(text=message)
+
+        def apply(replace: bool):
+            waypoints = parsed["waypoints"]
+            if not waypoints:
+                messagebox.showinfo("情報", "先に「解析する」を押してください",
+                                    parent=dialog)
+                return
+            if replace:
+                self.gpx_data.waypoints = list(waypoints)
+            else:
+                self.gpx_data.waypoints.extend(waypoints)
+
+            self.label_positions = {}
+            self._build_spot_list()
+            self.redraw()
+            self._refresh_times_text()
+            dialog.destroy()
+            self.set_status(
+                f"YAMAPのチェックポイントから {len(waypoints)} 件のスポットを作成しました")
+
+        ttk.Button(buttons, text="置き換えて作成",
+                   command=lambda: apply(True)).pack(side="left", padx=4)
+        ttk.Button(buttons, text="今のスポットに追加",
+                   command=lambda: apply(False)).pack(side="left", padx=4)
+        ttk.Button(buttons, text="キャンセル",
+                   command=dialog.destroy).pack(side="left", padx=4)
+
+        dialog.grab_set()
 
     # ===== スポット一覧パネル =====
 
